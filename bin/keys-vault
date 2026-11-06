@@ -173,13 +173,25 @@ EOF
 
     mkdir -p "$CIPHER_DIR"
 
-    # No -q: the master key is the only way to recover a damaged volume, so
-    # it must be visible here.
+    if [[ ! -t 1 ]]; then
+        printf 'keys-vault: stdout is not a terminal; gocryptfs will suppress the master key display.\n' >&2
+        printf 'keys-vault: run init interactively to capture it.\n' >&2
+    fi
+
+    # No -q: the master key is the only way to recover a damaged volume.
     printf '%s' "$pass" \
         | gocryptfs -init -- "$CIPHER_DIR" \
         || { rm -rf "$CIPHER_DIR"; die "gocryptfs -init failed"; }
 
-    kr_store "$pass"
+    if [[ -t 1 ]]; then
+        printf '\nSave the master key shown above: it is the only way to recover the vault.\n' >&2
+    fi
+
+    if ! kr_store "$pass"; then
+        printf 'keys-vault: vault initialized at %s, but storing the passphrase in the keyring failed.\n' "$CIPHER_DIR" >&2
+        printf 'keys-vault: keep the passphrase and master key — they are the only way to open it.\n' >&2
+        exit 1
+    fi
 
     mkdir -p "$PLAIN_DIR"
     printf '\nInitialized. Run: keys-vault open\n' >&2

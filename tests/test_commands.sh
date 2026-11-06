@@ -12,7 +12,6 @@ MOCK_STATE="${TESTDIR}/mock_state"
 mkdir -p "$MOCK_STATE" "${TESTDIR}/no_config"
 
 # gocryptfs: on -init create gocryptfs.conf, always consume stdin
-# Emits the master-key banner unless -q, so init tests can assert it is surfaced.
 make_mock_in "${MOCK_BIN}" gocryptfs '
 cat > /dev/null 2>/dev/null
 _dir="" _init=0 _sep=0 _quiet=0
@@ -147,6 +146,7 @@ run_vault_input "1
 assert_eq "init → exit 0" "0" "$_rc"
 assert_contains "init shows Initialized" "Initialized" "$_out"
 assert_contains "init shows master key" "Your master key is:" "$_out"
+assert_contains "init warns on non-tty stdout" "stdout is not a terminal" "$_out"
 if [[ -f "${_cipher}/gocryptfs.conf" ]]; then
     ok "gocryptfs.conf created"
 else
@@ -177,6 +177,33 @@ pass2
 " --dir="$_plain" --cipher-dir="$_cipher" init
 assert_eq "mismatch → exit 1" "1" "$_rc"
 assert_contains "mismatch error" "do not match" "$_out"
+
+
+section "init: keyring store fails"
+
+new_test_dirs
+rm -rf "$_cipher"
+
+# Override secret-tool to fail on store
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null; exit 1 ;;
+    lookup) echo "mock-passphrase" ;;
+esac'
+
+run_vault_input "1
+" --dir="$_plain" --cipher-dir="$_cipher" init
+assert_eq "store fail → exit 1" "1" "$_rc"
+assert_contains "store fail error" "storing the passphrase in the keyring failed" "$_out"
+assert_contains "store fail names vault" "$_cipher" "$_out"
+
+# Restore mock
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null ;;
+    lookup) echo "mock-passphrase" ;;
+esac
+exit 0'
 
 
 # ═══════════════════════════════════════════════════════════════

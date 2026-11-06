@@ -12,17 +12,23 @@ MOCK_STATE="${TESTDIR}/mock_state"
 mkdir -p "$MOCK_STATE" "${TESTDIR}/no_config"
 
 # gocryptfs: on -init create gocryptfs.conf, always consume stdin
+# Emits the master-key banner unless -q, so init tests can assert it is surfaced.
 make_mock_in "${MOCK_BIN}" gocryptfs '
 cat > /dev/null 2>/dev/null
-_dir="" _init=0 _sep=0
+_dir="" _init=0 _sep=0 _quiet=0
 for _a in "$@"; do
     [[ "$_a" == "-init" ]] && _init=1
+    [[ "$_a" == "-q" || "$_a" == "-quiet" ]] && _quiet=1
     [[ "$_a" == "--" ]] && { _sep=1; continue; }
     [[ $_sep -eq 1 && -z "$_dir" ]] && _dir="$_a"
 done
 if [[ $_init -eq 1 && -n "$_dir" ]]; then
     mkdir -p "$_dir"
     touch "${_dir}/gocryptfs.conf"
+fi
+if [[ $_quiet -eq 0 ]]; then
+    echo "Your master key is:"
+    echo "    deadbeef-deadbeef-deadbeef-deadbeef-deadbeef-deadbeef-deadbeef-deadbeef"
 fi
 exit 0'
 
@@ -140,6 +146,7 @@ run_vault_input "1
 " --dir="$_plain" --cipher-dir="$_cipher" init
 assert_eq "init → exit 0" "0" "$_rc"
 assert_contains "init shows Initialized" "Initialized" "$_out"
+assert_contains "init shows master key" "Your master key is:" "$_out"
 if [[ -f "${_cipher}/gocryptfs.conf" ]]; then
     ok "gocryptfs.conf created"
 else
@@ -157,6 +164,7 @@ testpassphrase
 " --dir="$_plain" --cipher-dir="$_cipher" init
 assert_eq "init user pass → exit 0" "0" "$_rc"
 assert_contains "init user pass shows Initialized" "Initialized" "$_out"
+assert_contains "init user pass shows master key" "Your master key is:" "$_out"
 
 
 section "init: mismatched passphrase"

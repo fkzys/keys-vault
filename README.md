@@ -70,7 +70,7 @@ keys-vault init
 
 | Command | Description |
 |---|---|
-| `init` | Create encrypted volume, store passphrase in keyring |
+| `init` | Create encrypted volume, print master key, store passphrase in keyring |
 | `open` | Mount vault; recovers stale mounts; no-op if already mounted or not initialized |
 | `close` | Unmount vault; handles stale mounts; no-op if not mounted |
 | `status` | Print state: `open` / `locked` / `stale` / `not initialized` |
@@ -84,6 +84,16 @@ keys-vault init
 | `--cipher-dir=PATH` | Encrypted ciphertext directory (default: derived from `--dir`) |
 | `-h`, `--help` | Show usage |
 | `--version` | Show version |
+
+## Master key recovery
+
+`init` displays the gocryptfs master key once (when run from a terminal). The
+master key is the only way to recover the vault if `gocryptfs.conf` is damaged
+or the passphrase is lost — gocryptfs cannot show it again afterwards. Save it
+somewhere safe (e.g. KeePassXC) when it is printed.
+
+When stdout is not a terminal, gocryptfs suppresses the master key so it cannot
+leak into logs; run `init` interactively to capture it.
 
 ## Systemd integration
 

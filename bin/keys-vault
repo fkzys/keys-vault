@@ -173,8 +173,10 @@ EOF
 
     mkdir -p "$CIPHER_DIR"
 
+    # No -q: the master key is the only way to recover a damaged volume, so
+    # it must be visible here.
     printf '%s' "$pass" \
-        | gocryptfs -init -q -- "$CIPHER_DIR" \
+        | gocryptfs -init -- "$CIPHER_DIR" \
         || { rm -rf "$CIPHER_DIR"; die "gocryptfs -init failed"; }
 
     kr_store "$pass"

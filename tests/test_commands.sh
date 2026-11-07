@@ -12,17 +12,22 @@ MOCK_STATE="${TESTDIR}/mock_state"
 mkdir -p "$MOCK_STATE" "${TESTDIR}/no_config"
 
 # gocryptfs: on -init create gocryptfs.conf, always consume stdin
-make_mock_in "${MOCK_BIN}" gocryptfs '
-cat > /dev/null 2>/dev/null
-_dir="" _init=0 _sep=0
+make_mock gocryptfs '
+cat > "${GOCRYPTFS_STDIN:-/dev/null}" 2>/dev/null
+_dir="" _init=0 _sep=0 _quiet=0
 for _a in "$@"; do
     [[ "$_a" == "-init" ]] && _init=1
+    [[ "$_a" == "-q" || "$_a" == "-quiet" ]] && _quiet=1
     [[ "$_a" == "--" ]] && { _sep=1; continue; }
     [[ $_sep -eq 1 && -z "$_dir" ]] && _dir="$_a"
 done
 if [[ $_init -eq 1 && -n "$_dir" ]]; then
     mkdir -p "$_dir"
     touch "${_dir}/gocryptfs.conf"
+fi
+if [[ $_quiet -eq 0 ]]; then
+    echo "Your master key is:"
+    echo "    deadbeef-deadbeef-deadbeef-deadbeef-deadbeef-deadbeef-deadbeef-deadbeef"
 fi
 exit 0'
 
@@ -55,6 +60,7 @@ set_unmounted() { rm -f "${MOCK_STATE}/mounted"; }
 run_vault() {
     _rc=0
     _out=$(env PATH="${MOCK_BIN}:${ORIG_PATH}" \
+               GOCRYPTFS_STDIN="${TESTDIR}/gocryptfs_stdin" \
                XDG_CONFIG_HOME="${TESTDIR}/no_config" \
                bash "$VAULT" "$@" 2>&1) || _rc=$?
 }
@@ -64,6 +70,7 @@ run_vault_input() {
     local input="$1"; shift
     _rc=0
     _out=$(printf '%s' "$input" | env PATH="${MOCK_BIN}:${ORIG_PATH}" \
+                                      GOCRYPTFS_STDIN="${TESTDIR}/gocryptfs_stdin" \
                                       XDG_CONFIG_HOME="${TESTDIR}/no_config" \
                                       bash "$VAULT" "$@" 2>&1) || _rc=$?
 }
@@ -140,6 +147,8 @@ run_vault_input "1
 " --dir="$_plain" --cipher-dir="$_cipher" init
 assert_eq "init → exit 0" "0" "$_rc"
 assert_contains "init shows Initialized" "Initialized" "$_out"
+assert_contains "init shows master key" "Your master key is:" "$_out"
+assert_contains "init warns on non-tty stdout" "stdout is not a terminal" "$_out"
 if [[ -f "${_cipher}/gocryptfs.conf" ]]; then
     ok "gocryptfs.conf created"
 else
@@ -157,6 +166,7 @@ testpassphrase
 " --dir="$_plain" --cipher-dir="$_cipher" init
 assert_eq "init user pass → exit 0" "0" "$_rc"
 assert_contains "init user pass shows Initialized" "Initialized" "$_out"
+assert_contains "init user pass shows master key" "Your master key is:" "$_out"
 
 
 section "init: mismatched passphrase"
@@ -169,6 +179,34 @@ pass2
 " --dir="$_plain" --cipher-dir="$_cipher" init
 assert_eq "mismatch → exit 1" "1" "$_rc"
 assert_contains "mismatch error" "do not match" "$_out"
+
+
+section "init: keyring store fails"
+
+new_test_dirs
+rm -rf "$_cipher"
+
+# Override secret-tool to fail on store
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null; exit 1 ;;
+    lookup) echo "mock-passphrase" ;;
+esac'
+
+run_vault_input "1
+" --dir="$_plain" --cipher-dir="$_cipher" init
+assert_eq "store fail → exit 1" "1" "$_rc"
+assert_contains "store fail error" "storing the passphrase in the keyring failed" "$_out"
+assert_contains "store fail names vault" "$_cipher" "$_out"
+assert_contains "store fail recovery hint" "keys-vault passwd" "$_out"
+
+# Restore mock
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null ;;
+    lookup) echo "mock-passphrase" ;;
+esac
+exit 0'
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -268,6 +306,181 @@ run_vault_input "1
 " --dir="$_plain" --cipher-dir="$_cipher" passwd
 assert_eq "passwd → exit 0" "0" "$_rc"
 assert_contains "passwd rotated" "rotated" "$_out"
+
+
+section "passwd: no keyring entry, master-key"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null ;;
+    lookup) exit 1 ;;
+esac
+exit 0'
+
+mk_dashed="11111111-22222222-33333333-44444444-55555555-66666666-77777777-88888888"
+mk_plain="${mk_dashed//-/}"
+mock_clear_log gocryptfs
+run_vault_input "y
+a
+${mk_dashed}
+2
+newpass
+newpass
+" --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "passwd masterkey → exit 0" "0" "$_rc"
+assert_contains "passwd masterkey offers option" "a) master-key" "$_out"
+assert_contains "passwd masterkey rotated" "rotated" "$_out"
+assert_contains "passwd masterkey uses stdin" "-masterkey=stdin" "$(mock_last_args gocryptfs)"
+assert_not_contains "passwd masterkey not on cmdline" "$mk_plain" "$(mock_last_args gocryptfs)"
+assert_file_contains "passwd masterkey sent via stdin" "$mk_plain" "${TESTDIR}/gocryptfs_stdin"
+
+
+section "passwd: invalid master key"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null ;;
+    lookup) exit 1 ;;
+esac
+exit 0'
+run_vault_input "y
+a
+not-a-master-key
+" --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "invalid master key → exit 1" "1" "$_rc"
+assert_contains "invalid master key error" "invalid master key" "$_out"
+
+
+section "passwd: no keyring entry, password"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+
+mock_clear_log gocryptfs
+run_vault_input "y
+b
+oldpass
+2
+newpass
+newpass
+" --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "passwd password → exit 0" "0" "$_rc"
+assert_contains "passwd password offers option" "b) password" "$_out"
+assert_contains "passwd password rotated" "rotated" "$_out"
+args="$(mock_last_args gocryptfs)"
+assert_contains "passwd password uses -passwd" "-passwd" "$args"
+assert_not_contains "passwd password has no -masterkey" "-masterkey" "$args"
+
+
+section "passwd: no keyring entry, declined"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+run_vault_input "n
+" --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "passwd declined → exit 1" "1" "$_rc"
+assert_contains "passwd declined aborts" "aborted" "$_out"
+
+
+section "passwd: keyring unavailable"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null ;;
+    lookup) echo "secret-tool: org.freedesktop.DBus.Error.ServiceUnknown" >&2; exit 1 ;;
+esac
+exit 0'
+run_vault --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "passwd unavailable → exit 1" "1" "$_rc"
+assert_contains "passwd unavailable error" "keyring unavailable" "$_out"
+
+
+section "passwd: keyring store fails"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null; exit 1 ;;
+    lookup) echo "mock-passphrase" ;;
+esac'
+run_vault_input "1
+" --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "passwd store fail → exit 1" "1" "$_rc"
+assert_contains "passwd store fail error" "storing it in the keyring failed" "$_out"
+assert_not_contains "passwd store fail no success" "rotated and updated" "$_out"
+
+
+section "passwd: empty keyring entry"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null ;;
+    lookup) exit 0 ;;
+esac
+exit 0'
+run_vault_input "y
+b
+oldpass
+2
+newpass
+newpass
+" --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "empty entry → exit 0" "0" "$_rc"
+assert_contains "empty entry treated as missing" "b) password" "$_out"
+
+
+section "passwd: stderr warning does not pollute passphrase"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null ;;
+    lookup) echo "GLib-WARNING: noise" >&2; echo "real-passphrase" ;;
+esac
+exit 0'
+mock_clear_log gocryptfs
+run_vault_input "2
+newpass
+newpass
+" --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "stderr warning → exit 0" "0" "$_rc"
+assert_file_contains "clean passphrase passed to gocryptfs" "real-passphrase" "${TESTDIR}/gocryptfs_stdin"
+assert_not_contains "stderr warning not in gocryptfs stdin" "GLib-WARNING" "$(cat "${TESTDIR}/gocryptfs_stdin")"
+
+
+section "kr_lookup_status: temp file under XDG_RUNTIME_DIR"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+mkdir -p "${TESTDIR}/run"
+make_mock_in "${MOCK_BIN}" secret-tool "
+case \"\$1\" in
+    store)  cat > /dev/null ;;
+    lookup) readlink /proc/\$\$/fd/2 > '${TESTDIR}/stderr_path' 2>/dev/null; echo 'dbus error' >&2; exit 1 ;;
+esac
+exit 0"
+XDG_RUNTIME_DIR="${TESTDIR}/run" run_vault --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "xrd: unavailable rc" "1" "$_rc"
+assert_contains "xrd: temp under XDG_RUNTIME_DIR" "${TESTDIR}/run/keys-vault." "$(cat "${TESTDIR}/stderr_path" 2>/dev/null)"
+
+# Restore default secret-tool mock
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null ;;
+    lookup) echo "mock-passphrase" ;;
+esac
+exit 0'
 
 
 summary

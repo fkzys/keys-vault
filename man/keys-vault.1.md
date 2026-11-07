@@ -24,7 +24,8 @@ passphrase is stored in GNOME Keyring for automatic unlock.
 **init**
 :   Create a new encrypted volume and store the passphrase in GNOME Keyring.
     Offers a choice between a randomly generated passphrase and a user-supplied
-    one. Refuses to initialize if the plaintext directory is not empty.
+    one. Refuses to initialize if the plaintext directory is not empty. Prints
+    the gocryptfs master key when run on a terminal.
 
 **open**
 :   Mount the vault using the passphrase from GNOME Keyring. Automatically
@@ -93,6 +94,16 @@ as a distinct state.
 
 Passphrases are stored in GNOME Keyring via **secret-tool**(1). Each vault
 directory gets a unique keyring entry keyed by its resolved plaintext path.
+
+# MASTER KEY
+
+**init** prints the gocryptfs master key once, when output is a terminal. The
+master key is the only way to recover the vault if **gocryptfs.conf** is
+damaged or the passphrase is lost; it cannot be displayed again afterwards.
+Store it in a safe place immediately.
+
+When stdout is not a terminal, gocryptfs suppresses the master key to keep it
+out of log files. Run **init** interactively to capture it.
 
 # EXAMPLES
 

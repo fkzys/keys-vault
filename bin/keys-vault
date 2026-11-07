@@ -117,6 +117,26 @@ kr_lookup() {
     timeout 5 secret-tool lookup application "$attr" 2>/dev/null
 }
 
+# 0 = found (prints passphrase), 1 = no entry, 2 = keyring unavailable
+kr_lookup_status() {
+    local attr err out rc=0
+    attr=$(kr_attr)
+    err=$(mktemp "${TMPDIR:-/tmp}/keys-vault.XXXXXX")
+    if out=$(timeout 5 secret-tool lookup application "$attr" 2>"$err"); then
+        rm -f "$err"
+        printf '%s' "$out"
+        return 0
+    else
+        rc=$?
+    fi
+    if [[ $rc -eq 124 || -s "$err" ]]; then
+        rm -f "$err"
+        return 2
+    fi
+    rm -f "$err"
+    return 1
+}
+
 read_pass() {
     local pass pass2
     IFS= read -rsp "Passphrase: " pass; echo >&2
@@ -244,9 +264,11 @@ cmd_status() {
 cmd_passwd() {
     is_initialized || die "not initialized — run: keys-vault init"
 
-    local cred="" mode="password"
-    cred=$(kr_lookup) || cred=""
-    if [[ -z "$cred" ]]; then
+    local cred="" mode="password" rc=0
+    cred=$(kr_lookup_status) || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        die "keyring unavailable (is gnome-keyring running?)"
+    elif [[ $rc -eq 1 ]]; then
         local answer
         IFS= read -rp 'No passphrase in keyring. Set a new one? [y/N]: ' answer
         case "$answer" in
@@ -260,10 +282,12 @@ cmd_passwd() {
         IFS= read -rp 'Choice [a/b]: ' answer
         case "$answer" in
             a|A)
-                IFS= read -rp 'Master key: ' cred
-                cred="${cred//[^0-9a-fA-F]/}"
+                IFS= read -rsp 'Master key: ' cred; echo >&2
+                cred="${cred//[[:space:]]/}"
+                cred="${cred//-/}"
+                [[ "$cred" =~ ^[0-9a-fA-F]{64}$ ]] \
+                    || die "invalid master key (expected 64 hex characters)"
                 cred="${cred,,}"
-                [[ -n "$cred" ]] || die "empty master key"
                 mode="masterkey"
                 ;;
             b|B)
@@ -279,8 +303,8 @@ cmd_passwd() {
     [[ -n "$new" ]] || die "empty passphrase"
 
     if [[ "$mode" = "masterkey" ]]; then
-        printf '%s\n' "$new" \
-            | gocryptfs -passwd -q -masterkey="$cred" -- "$CIPHER_DIR" \
+        printf '%s\n%s\n' "$cred" "$new" \
+            | gocryptfs -passwd -q -masterkey=stdin -- "$CIPHER_DIR" \
             || die "gocryptfs -passwd failed"
     else
         printf '%s\n%s\n' "$cred" "$new" \
@@ -288,7 +312,11 @@ cmd_passwd() {
             || die "gocryptfs -passwd failed"
     fi
 
-    kr_store "$new"
+    if ! kr_store "$new"; then
+        printf 'keys-vault: passphrase rotated at %s, but storing it in the keyring failed.\n' "$CIPHER_DIR" >&2
+        printf 'keys-vault: run keys-vault passwd to set the passphrase again.\n' >&2
+        exit 1
+    fi
     printf 'Passphrase rotated and updated in keyring.\n' >&2
 }
 

@@ -13,7 +13,7 @@ mkdir -p "$MOCK_STATE" "${TESTDIR}/no_config"
 
 # gocryptfs: on -init create gocryptfs.conf, always consume stdin
 make_mock gocryptfs '
-cat > /dev/null 2>/dev/null
+cat > "${GOCRYPTFS_STDIN:-/dev/null}" 2>/dev/null
 _dir="" _init=0 _sep=0 _quiet=0
 for _a in "$@"; do
     [[ "$_a" == "-init" ]] && _init=1
@@ -60,6 +60,7 @@ set_unmounted() { rm -f "${MOCK_STATE}/mounted"; }
 run_vault() {
     _rc=0
     _out=$(env PATH="${MOCK_BIN}:${ORIG_PATH}" \
+               GOCRYPTFS_STDIN="${TESTDIR}/gocryptfs_stdin" \
                XDG_CONFIG_HOME="${TESTDIR}/no_config" \
                bash "$VAULT" "$@" 2>&1) || _rc=$?
 }
@@ -69,6 +70,7 @@ run_vault_input() {
     local input="$1"; shift
     _rc=0
     _out=$(printf '%s' "$input" | env PATH="${MOCK_BIN}:${ORIG_PATH}" \
+                                      GOCRYPTFS_STDIN="${TESTDIR}/gocryptfs_stdin" \
                                       XDG_CONFIG_HOME="${TESTDIR}/no_config" \
                                       bash "$VAULT" "$@" 2>&1) || _rc=$?
 }
@@ -331,7 +333,27 @@ newpass
 assert_eq "passwd masterkey → exit 0" "0" "$_rc"
 assert_contains "passwd masterkey offers option" "a) master-key" "$_out"
 assert_contains "passwd masterkey rotated" "rotated" "$_out"
-assert_contains "passwd masterkey passes plain hex" "-masterkey=${mk_plain}" "$(mock_last_args gocryptfs)"
+assert_contains "passwd masterkey uses stdin" "-masterkey=stdin" "$(mock_last_args gocryptfs)"
+assert_not_contains "passwd masterkey not on cmdline" "$mk_plain" "$(mock_last_args gocryptfs)"
+assert_file_contains "passwd masterkey sent via stdin" "$mk_plain" "${TESTDIR}/gocryptfs_stdin"
+
+
+section "passwd: invalid master key"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null ;;
+    lookup) exit 1 ;;
+esac
+exit 0'
+run_vault_input "y
+a
+not-a-master-key
+" --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "invalid master key → exit 1" "1" "$_rc"
+assert_contains "invalid master key error" "invalid master key" "$_out"
 
 
 section "passwd: no keyring entry, password"
@@ -363,6 +385,37 @@ run_vault_input "n
 " --dir="$_plain" --cipher-dir="$_cipher" passwd
 assert_eq "passwd declined → exit 1" "1" "$_rc"
 assert_contains "passwd declined aborts" "aborted" "$_out"
+
+
+section "passwd: keyring unavailable"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null ;;
+    lookup) echo "secret-tool: org.freedesktop.DBus.Error.ServiceUnknown" >&2; exit 1 ;;
+esac
+exit 0'
+run_vault --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "passwd unavailable → exit 1" "1" "$_rc"
+assert_contains "passwd unavailable error" "keyring unavailable" "$_out"
+
+
+section "passwd: keyring store fails"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null; exit 1 ;;
+    lookup) echo "mock-passphrase" ;;
+esac'
+run_vault_input "1
+" --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "passwd store fail → exit 1" "1" "$_rc"
+assert_contains "passwd store fail error" "storing it in the keyring failed" "$_out"
+assert_not_contains "passwd store fail no success" "rotated and updated" "$_out"
 
 # Restore default secret-tool mock
 make_mock_in "${MOCK_BIN}" secret-tool '

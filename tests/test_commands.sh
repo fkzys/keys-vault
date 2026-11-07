@@ -12,7 +12,7 @@ MOCK_STATE="${TESTDIR}/mock_state"
 mkdir -p "$MOCK_STATE" "${TESTDIR}/no_config"
 
 # gocryptfs: on -init create gocryptfs.conf, always consume stdin
-make_mock_in "${MOCK_BIN}" gocryptfs '
+make_mock gocryptfs '
 cat > /dev/null 2>/dev/null
 _dir="" _init=0 _sep=0 _quiet=0
 for _a in "$@"; do
@@ -196,6 +196,7 @@ run_vault_input "1
 assert_eq "store fail → exit 1" "1" "$_rc"
 assert_contains "store fail error" "storing the passphrase in the keyring failed" "$_out"
 assert_contains "store fail names vault" "$_cipher" "$_out"
+assert_contains "store fail recovery hint" "keys-vault passwd" "$_out"
 
 # Restore mock
 make_mock_in "${MOCK_BIN}" secret-tool '
@@ -303,6 +304,73 @@ run_vault_input "1
 " --dir="$_plain" --cipher-dir="$_cipher" passwd
 assert_eq "passwd → exit 0" "0" "$_rc"
 assert_contains "passwd rotated" "rotated" "$_out"
+
+
+section "passwd: no keyring entry, master-key"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null ;;
+    lookup) exit 1 ;;
+esac
+exit 0'
+
+mk_dashed="11111111-22222222-33333333-44444444-55555555-66666666-77777777-88888888"
+mk_plain="${mk_dashed//-/}"
+mock_clear_log gocryptfs
+run_vault_input "y
+a
+${mk_dashed}
+2
+newpass
+newpass
+" --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "passwd masterkey → exit 0" "0" "$_rc"
+assert_contains "passwd masterkey offers option" "a) master-key" "$_out"
+assert_contains "passwd masterkey rotated" "rotated" "$_out"
+assert_contains "passwd masterkey passes plain hex" "-masterkey=${mk_plain}" "$(mock_last_args gocryptfs)"
+
+
+section "passwd: no keyring entry, password"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+
+mock_clear_log gocryptfs
+run_vault_input "y
+b
+oldpass
+2
+newpass
+newpass
+" --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "passwd password → exit 0" "0" "$_rc"
+assert_contains "passwd password offers option" "b) password" "$_out"
+assert_contains "passwd password rotated" "rotated" "$_out"
+args="$(mock_last_args gocryptfs)"
+assert_contains "passwd password uses -passwd" "-passwd" "$args"
+assert_not_contains "passwd password has no -masterkey" "-masterkey" "$args"
+
+
+section "passwd: no keyring entry, declined"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+run_vault_input "n
+" --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "passwd declined → exit 1" "1" "$_rc"
+assert_contains "passwd declined aborts" "aborted" "$_out"
+
+# Restore default secret-tool mock
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null ;;
+    lookup) echo "mock-passphrase" ;;
+esac
+exit 0'
 
 
 summary

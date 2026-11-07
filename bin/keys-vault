@@ -189,7 +189,7 @@ EOF
 
     if ! kr_store "$pass"; then
         printf 'keys-vault: vault initialized at %s, but storing the passphrase in the keyring failed.\n' "$CIPHER_DIR" >&2
-        printf 'keys-vault: keep the passphrase and master key — they are the only way to open it.\n' >&2
+        printf 'keys-vault: run keys-vault passwd to set the passphrase again.\n' >&2
         exit 1
     fi
 
@@ -244,15 +244,49 @@ cmd_status() {
 cmd_passwd() {
     is_initialized || die "not initialized — run: keys-vault init"
 
-    local old new
-    old=$(kr_lookup) || die "cannot read current passphrase from keyring"
+    local cred="" mode="password"
+    cred=$(kr_lookup) || cred=""
+    if [[ -z "$cred" ]]; then
+        local answer
+        IFS= read -rp 'No passphrase in keyring. Set a new one? [y/N]: ' answer
+        case "$answer" in
+            [yY]*) ;;
+            *) printf 'keys-vault: aborted\n' >&2; exit 1 ;;
+        esac
 
+        printf 'Decrypt vault with:\n' >&2
+        printf '  a) master-key\n' >&2
+        printf '  b) password\n' >&2
+        IFS= read -rp 'Choice [a/b]: ' answer
+        case "$answer" in
+            a|A)
+                IFS= read -rp 'Master key: ' cred
+                cred="${cred//[^0-9a-fA-F]/}"
+                cred="${cred,,}"
+                [[ -n "$cred" ]] || die "empty master key"
+                mode="masterkey"
+                ;;
+            b|B)
+                IFS= read -rsp 'Current passphrase: ' cred; echo >&2
+                [[ -n "$cred" ]] || die "empty passphrase"
+                ;;
+            *) die "invalid choice" ;;
+        esac
+    fi
+
+    local new
     new=$(choose_pass) || die "passphrase input failed"
     [[ -n "$new" ]] || die "empty passphrase"
 
-    printf '%s\n%s\n' "$old" "$new" \
-        | gocryptfs -passwd -q -- "$CIPHER_DIR" \
-        || die "gocryptfs -passwd failed"
+    if [[ "$mode" = "masterkey" ]]; then
+        printf '%s\n' "$new" \
+            | gocryptfs -passwd -q -masterkey="$cred" -- "$CIPHER_DIR" \
+            || die "gocryptfs -passwd failed"
+    else
+        printf '%s\n%s\n' "$cred" "$new" \
+            | gocryptfs -passwd -q -- "$CIPHER_DIR" \
+            || die "gocryptfs -passwd failed"
+    fi
 
     kr_store "$new"
     printf 'Passphrase rotated and updated in keyring.\n' >&2

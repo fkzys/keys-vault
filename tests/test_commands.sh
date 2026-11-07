@@ -417,6 +417,63 @@ assert_eq "passwd store fail → exit 1" "1" "$_rc"
 assert_contains "passwd store fail error" "storing it in the keyring failed" "$_out"
 assert_not_contains "passwd store fail no success" "rotated and updated" "$_out"
 
+
+section "passwd: empty keyring entry"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null ;;
+    lookup) exit 0 ;;
+esac
+exit 0'
+run_vault_input "y
+b
+oldpass
+2
+newpass
+newpass
+" --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "empty entry → exit 0" "0" "$_rc"
+assert_contains "empty entry treated as missing" "b) password" "$_out"
+
+
+section "passwd: stderr warning does not pollute passphrase"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+make_mock_in "${MOCK_BIN}" secret-tool '
+case "$1" in
+    store)  cat > /dev/null ;;
+    lookup) echo "GLib-WARNING: noise" >&2; echo "real-passphrase" ;;
+esac
+exit 0'
+mock_clear_log gocryptfs
+run_vault_input "2
+newpass
+newpass
+" --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "stderr warning → exit 0" "0" "$_rc"
+assert_file_contains "clean passphrase passed to gocryptfs" "real-passphrase" "${TESTDIR}/gocryptfs_stdin"
+assert_not_contains "stderr warning not in gocryptfs stdin" "GLib-WARNING" "$(cat "${TESTDIR}/gocryptfs_stdin")"
+
+
+section "kr_lookup_status: temp file under XDG_RUNTIME_DIR"
+
+new_test_dirs
+touch "${_cipher}/gocryptfs.conf"
+mkdir -p "${TESTDIR}/run"
+make_mock_in "${MOCK_BIN}" secret-tool "
+case \"\$1\" in
+    store)  cat > /dev/null ;;
+    lookup) readlink /proc/\$\$/fd/2 > '${TESTDIR}/stderr_path' 2>/dev/null; echo 'dbus error' >&2; exit 1 ;;
+esac
+exit 0"
+XDG_RUNTIME_DIR="${TESTDIR}/run" run_vault --dir="$_plain" --cipher-dir="$_cipher" passwd
+assert_eq "xrd: unavailable rc" "1" "$_rc"
+assert_contains "xrd: temp under XDG_RUNTIME_DIR" "${TESTDIR}/run/keys-vault." "$(cat "${TESTDIR}/stderr_path" 2>/dev/null)"
+
 # Restore default secret-tool mock
 make_mock_in "${MOCK_BIN}" secret-tool '
 case "$1" in

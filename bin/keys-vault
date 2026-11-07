@@ -119,15 +119,19 @@ kr_lookup() {
 
 # 0 = found (prints passphrase), 1 = no entry, 2 = keyring unavailable
 kr_lookup_status() {
-    local attr err out rc=0
+    local attr dir err out rc=0
     attr=$(kr_attr)
-    err=$(mktemp "${TMPDIR:-/tmp}/keys-vault.XXXXXX")
-    if out=$(timeout 5 secret-tool lookup application "$attr" 2>"$err"); then
+    dir="${XDG_RUNTIME_DIR:-}"
+    [[ -n "$dir" && -d "$dir" && -w "$dir" ]] || dir="${TMPDIR:-/tmp}"
+    [[ -d "$dir" && -w "$dir" ]] || dir=/tmp
+    err=$(mktemp "$dir/keys-vault.XXXXXX") \
+        || { printf 'keys-vault: cannot create temporary file\n' >&2; return 2; }
+    out=$(timeout 5 secret-tool lookup application "$attr" 2>"$err") || rc=$?
+    if [[ $rc -eq 0 ]]; then
         rm -f "$err"
+        [[ -n "$out" ]] || return 1
         printf '%s' "$out"
         return 0
-    else
-        rc=$?
     fi
     if [[ $rc -eq 124 || -s "$err" ]]; then
         rm -f "$err"
